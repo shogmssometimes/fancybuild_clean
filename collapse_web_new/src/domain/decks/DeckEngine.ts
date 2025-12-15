@@ -10,6 +10,8 @@ export type Card = {
   type?: string;
   text?: string;
   details?: CardDetail[];
+  target?: string;
+  rarity?: string;
 };
 
 export type DeckState = {

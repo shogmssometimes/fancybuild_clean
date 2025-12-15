@@ -22,13 +22,19 @@ const formatModCardText = (card: RawModCard) => {
   return summary.join(' • ')
 }
 
-export const modCards: Card[] = modCardData.map((card) => ({
-  id: card.id,
-  name: card.name,
-  type: 'mod',
-  cost: card.cost,
-  text: formatModCardText(card),
-  details: buildModCardDetails(card),
-}))
+export const modCards: Card[] = modCardData.map((card) => {
+  const target = normalize(card.target)
+  const rarity = normalize(card.type)
+  return {
+    id: card.id,
+    name: card.name,
+    type: 'mod',
+    cost: card.cost,
+    text: formatModCardText(card),
+    details: buildModCardDetails(card),
+    target: target || undefined,
+    rarity: rarity || undefined,
+  }
+})
 
 export default modCards

@@ -11,6 +11,7 @@ const DEFAULT_MIN_NULLS = 5
 const DEFAULT_STORAGE_KEY = 'collapse.deck-builder.v2'
 const DEFAULT_MODIFIER_CAPACITY = 10
 const DEFAULT_HAND_LIMIT = 5
+const MAX_HAND_LIMIT = 20
 
 type CountMap = Record<string, number>
 
@@ -89,7 +90,7 @@ const loadState = (baseCards: Card[], modCards: Card[], storageKey: string, minN
       discard: parsed.discard ?? [],
       isLocked: parsed.isLocked ?? false,
       deckName: parsed.deckName ?? '',
-      handLimit: parsed.handLimit ?? DEFAULT_HAND_LIMIT,
+      handLimit: clamp(parsed.handLimit ?? DEFAULT_HAND_LIMIT, 0, MAX_HAND_LIMIT),
       savedDecks: parsed.savedDecks ?? {},
     }
   } catch {
@@ -118,6 +119,7 @@ type DeckBuilderProps = {
   showModifierCapacity?: boolean
   showBaseCounters?: boolean
   showBaseAdjusters?: boolean
+  lockControlsInOps?: boolean
 }
 
 export default function DeckBuilder({
@@ -141,6 +143,7 @@ export default function DeckBuilder({
   showModifierCapacity = true,
   showBaseCounters = true,
   showBaseAdjusters = true,
+  lockControlsInOps = true,
 }: DeckBuilderProps){
   const baseCards = baseCardsOverride ?? (Handbook.baseCards ?? [])
   const modCards = modCardsOverride ?? (Handbook.modCards ?? [])
@@ -172,15 +175,20 @@ export default function DeckBuilder({
 
   const initialState = applyInitialCounts(loadState(baseCards, modCards, storageKey, minNulls, modifierCapacityDefault))
   const [builderState, setBuilderState] = useState(initialState)
-  const [modSearch, setModSearch] = useState('')
+  const [costFilterIndex, setCostFilterIndex] = useState(0)
+  const [targetFilterIndex, setTargetFilterIndex] = useState(0)
+  const [rarityFilterIndex, setRarityFilterIndex] = useState(0)
   const [deckSeed, setDeckSeed] = useState(0)
   const [activePlay, setActivePlay] = useState<ActivePlay>(null)
+  const [modifierOverlayInView, setModifierOverlayInView] = useState(false)
+  const [modifierOverlayPinned, setModifierOverlayPinned] = useState(false)
   const compactView = false
   const [attachWarningId, setAttachWarningId] = useState<string | null>(null)
   const [hasBuiltDeck, setHasBuiltDeck] = useState(initialState.hasBuiltDeck ?? false)
   const [hasShuffledDeck, setHasShuffledDeck] = useState(initialState.hasShuffledDeck ?? false)
   const [opsError, setOpsError] = useState<string | null>(null)
   const handListRef = useRef<HTMLDivElement | null>(null)
+  const modifierSectionRef = useRef<HTMLDivElement | null>(null)
   const [handNavState, setHandNavState] = useState({ left: false, right: false })
   const [basePrompt, setBasePrompt] = useState<{ id: string; qty: number; name?: string } | null>(null)
   const [modPrompt, setModPrompt] = useState<{ id: string; qty: number; name?: string } | null>(null)
@@ -198,6 +206,22 @@ export default function DeckBuilder({
     () => (modCapacityAsCount ? sumCounts(builderState.modCounts) : getModCapacityUsed(modCards, builderState.modCounts)),
     [builderState.modCounts, modCards, modCapacityAsCount]
   )
+  const modCapacityTotal = builderState.modifierCapacity ?? 0
+  const modCapacityRemaining = Math.max(modCapacityTotal - modCapacityUsed, 0)
+  const modOverlayLabel = modCapacityAsCount ? 'Modifier Slots Left' : 'Modifier Capacity Left'
+  const cardsRemaining = builderState.deck?.length ?? 0
+  const totalCards = cardsRemaining + (builderState.hand?.length ?? 0) + (builderState.discard?.length ?? 0)
+  const deckPercent = totalCards > 0 ? cardsRemaining / totalCards : 0
+  const drawHealthVariant = useMemo(() => {
+    if (deckPercent >= 0.9) return 'healthy'
+    if (deckPercent >= 0.7) return 'ready'
+    if (deckPercent >= 0.5) return 'caution'
+    if (deckPercent >= 0.3) return 'warning'
+    if (deckPercent >= 0.1) return 'critical'
+    return 'depleted'
+  }, [deckPercent])
+  const drawHealthPercent = Math.round(deckPercent * 100)
+  const drawHealthLabel = totalCards > 0 ? `${drawHealthPercent}% deck remaining` : 'Deck empty'
 
   const getModUsedSnapshot = useCallback(
     (state: DeckBuilderState) => (modCapacityAsCount ? sumCounts(state.modCounts ?? {}) : getModCapacityUsed(modCards, state.modCounts ?? {})),
@@ -233,16 +257,92 @@ export default function DeckBuilder({
   const lockPill = builderState.isLocked ? <span className="lock-pill locked">{lockLabel}</span> : <span className="lock-pill unlocked">{lockLabel}</span>
 
   // Mouse move/up handlers attached to window for desktop drag support
+  type FilterOption<T> = { label: string; value: T }
+
+  const costFilterOptions = useMemo<FilterOption<number | null>[]>(() => {
+    const costs = Array.from(new Set(modCards.map((card) => (typeof card.cost === 'number' ? card.cost : null)).filter((value): value is number => value !== null))).sort((a, b) => a - b)
+    return [{ label: 'Any', value: null }, ...costs.map((cost) => ({ label: String(cost), value: cost }))]
+  }, [modCards])
+
+  const buildStringFilterOptions = (extract: (card: Card) => string | undefined): FilterOption<string | null>[] => {
+    const seen = new Map<string, string>()
+    modCards.forEach((card) => {
+      const raw = extract(card)
+      if (!raw) return
+      const normalized = raw.trim()
+      if (!normalized) return
+      const key = normalized.toLowerCase()
+      if (!seen.has(key)) seen.set(key, normalized)
+    })
+    const sorted = Array.from(seen.entries()).sort((a, b) => a[1].localeCompare(b[1], undefined, { sensitivity: 'base' }))
+    return [{ label: 'Any', value: null }, ...sorted.map(([key, display]) => ({ label: display, value: key }))]
+  }
+
+  const targetFilterOptions = useMemo(() => buildStringFilterOptions((card) => card.target), [modCards])
+  const rarityFilterOptions = useMemo(() => buildStringFilterOptions((card) => card.rarity), [modCards])
+
+  useEffect(() => {
+    setCostFilterIndex((idx) => (costFilterOptions.length ? idx % costFilterOptions.length : 0))
+  }, [costFilterOptions.length])
+  useEffect(() => {
+    setTargetFilterIndex((idx) => (targetFilterOptions.length ? idx % targetFilterOptions.length : 0))
+  }, [targetFilterOptions.length])
+  useEffect(() => {
+    setRarityFilterIndex((idx) => (rarityFilterOptions.length ? idx % rarityFilterOptions.length : 0))
+  }, [rarityFilterOptions.length])
+
+  const activeCostFilter = costFilterOptions[costFilterIndex]?.value ?? null
+  const activeTargetFilter = targetFilterOptions[targetFilterIndex]?.value ?? null
+  const activeRarityFilter = rarityFilterOptions[rarityFilterIndex]?.value ?? null
+  const costFilterLabel = costFilterOptions[costFilterIndex]?.label ?? 'Any'
+  const targetFilterLabel = targetFilterOptions[targetFilterIndex]?.label ?? 'Any'
+  const rarityFilterLabel = rarityFilterOptions[rarityFilterIndex]?.label ?? 'Any'
+
+  const cycleCostFilter = useCallback(() => {
+    setCostFilterIndex((idx) => (costFilterOptions.length ? (idx + 1) % costFilterOptions.length : 0))
+  }, [costFilterOptions.length])
+
+  const cycleTargetFilter = useCallback(() => {
+    setTargetFilterIndex((idx) => (targetFilterOptions.length ? (idx + 1) % targetFilterOptions.length : 0))
+  }, [targetFilterOptions.length])
+
+  const cycleRarityFilter = useCallback(() => {
+    setRarityFilterIndex((idx) => (rarityFilterOptions.length ? (idx + 1) % rarityFilterOptions.length : 0))
+  }, [rarityFilterOptions.length])
+
+  useEffect(() => {
+    if (simpleCounters || !showModifierCards) {
+      setModifierOverlayInView(false)
+      setModifierOverlayPinned(false)
+      return
+    }
+    const handleScroll = () => {
+      const section = modifierSectionRef.current
+      if (!section) return
+      const rect = section.getBoundingClientRect()
+      const threshold = 80
+      const isActive = rect.top <= threshold && rect.bottom > threshold
+      setModifierOverlayInView(isActive)
+    }
+    const scrollOptions: AddEventListenerOptions = { passive: true }
+    handleScroll()
+    window.addEventListener('scroll', handleScroll, scrollOptions)
+    window.addEventListener('resize', handleScroll)
+    return () => {
+      window.removeEventListener('scroll', handleScroll, scrollOptions)
+      window.removeEventListener('resize', handleScroll)
+    }
+  }, [showModifierCards, simpleCounters])
+
   const filteredModCards = useMemo(() => {
     if (simpleCounters) return modCards
-    if (!modSearch.trim()) return modCards
-    const needle = modSearch.trim().toLowerCase()
-    return modCards.filter((card) =>
-      [card.name, card.text, card.details?.map((d) => d.value).join(' ')].some((field) =>
-        field?.toLowerCase().includes(needle)
-      )
-    )
-  }, [modCards, modSearch, simpleCounters])
+    return modCards.filter((card) => {
+      if (activeCostFilter !== null && card.cost !== activeCostFilter) return false
+      if (activeTargetFilter && (card.target?.toLowerCase() ?? '') !== activeTargetFilter) return false
+      if (activeRarityFilter && (card.rarity?.toLowerCase() ?? '') !== activeRarityFilter) return false
+      return true
+    })
+  }, [activeCostFilter, activeRarityFilter, activeTargetFilter, modCards, simpleCounters])
 
   const cardLookup = useMemo(() => {
     const all: Card[] = [...baseCards, ...modCards]
@@ -282,57 +382,54 @@ export default function DeckBuilder({
     return arr
   }
 
-  const generateDeck = (shuffle = true) => {
-    const newDeck = buildDeckArray()
-    if (shuffle) shuffleInPlace(newDeck)
-    setBuilderState((prev) => ({ ...prev, deck: newDeck, hasBuiltDeck: true, hasShuffledDeck: false }))
-    setDeckSeed((s) => s + 1)
-    setHasBuiltDeck(true)
-    setHasShuffledDeck(false)
-    setOpsError(null)
-  }
-
   const shuffleDeck = () => {
-    setBuilderState((prev) => ({ ...prev, deck: prev.deck ? shuffleInPlace([...prev.deck]) : [], hasShuffledDeck: builderState.isLocked || prev.hasShuffledDeck }))
+    if (hasShuffledDeck) {
+      const confirmed = window.confirm('Commit a Hard Shuffle? This will randomize the remaining cards.')
+      if (!confirmed) return
+    }
+    setBuilderState((prev) => {
+      const currentDeck = prev.deck ?? []
+      const nextDeck = currentDeck.length ? shuffleInPlace([...currentDeck]) : currentDeck
+      return {
+        ...prev,
+        deck: nextDeck,
+        hasShuffledDeck: true,
+      }
+    })
     setDeckSeed((s) => s + 1)
-    if (builderState.isLocked) setHasShuffledDeck(true)
+    setHasShuffledDeck(true)
     setOpsError(null)
   }
 
   // Draw a single card to hand (only allowed when deck is locked)
   const draw = () => {
+    let drewCard = false
+    let depleted = false
     setBuilderState((prev) => {
-      // disallow drawing when deck isn't locked
       if (!prev.isLocked) return prev
-      // disallow drawing when hand is at or above the limit; this prevents
-      // returning discard to the deck (which turns a draw into a discard)
       if ((prev.hand ?? []).length >= (prev.handLimit ?? DEFAULT_HAND_LIMIT)) return prev
-      let deck = [...(prev.deck ?? [])]
+      const deck = [...(prev.deck ?? [])]
       const hand = [...(prev.hand ?? [])]
       const discard = [...(prev.discard ?? [])]
-
-      // auto-build if deck and discard are empty (simple counter GM mode)
-      if (deck.length === 0 && discard.length === 0) {
-        deck = shuffleInPlace(buildDeckArray())
-      }
-
       if (deck.length === 0) {
-        // shuffle discard back in if deck is empty
-        if (discard.length === 0) return { ...prev }
-        const ids = discard.map((d) => d.id)
-        shuffleInPlace(ids)
-        // for LIFO model, append shuffled discard to the end (top)
-        deck.push(...ids)
-        discard.length = 0
+        depleted = true
+        return prev
       }
-      // LIFO: draw from top-of-deck with pop
       const cardId = deck.pop()
-      if (!cardId) return { ...prev, deck, hand, discard }
-      // we already checked hand limit above, so adding is safe
+      if (!cardId) {
+        depleted = true
+        return prev
+      }
       hand.push({ id: cardId, state: 'unspent' })
+      drewCard = true
       return { ...prev, deck, hand, discard }
     })
-    setDeckSeed((s) => s + 1)
+    if (drewCard) {
+      setDeckSeed((s) => s + 1)
+      setOpsError(null)
+    } else if (depleted) {
+      setOpsError('Deck depleted. Refill or rebuild to continue drawing.')
+    }
   }
 
   // Remove discardFromDeck - deprecated in new UI; keep internal function to support automated flows
@@ -393,7 +490,6 @@ export default function DeckBuilder({
       setOpsError('Shuffle the deck before drawing.')
       return
     }
-    setOpsError(null)
     draw()
   }
 
@@ -403,10 +499,10 @@ export default function DeckBuilder({
       const nextLocked = !prev.isLocked
       if (nextLocked) {
         const built = shuffleInPlace(buildDeckArray())
-        setHasBuiltDeck(false)
+        setHasBuiltDeck(true)
         setHasShuffledDeck(false)
-        setOpsError('Build then shuffle before drawing.')
-        return { ...prev, isLocked: nextLocked, deck: built, hand: [], discard: [], hasBuiltDeck: false, hasShuffledDeck: false }
+        setOpsError('Shuffle the deck before drawing.')
+        return { ...prev, isLocked: nextLocked, deck: built, hand: [], discard: [], hasBuiltDeck: true, hasShuffledDeck: false }
       }
       setHasBuiltDeck(false)
       setHasShuffledDeck(false)
@@ -563,7 +659,9 @@ export default function DeckBuilder({
 
   const resetBuilder = () => {
     setBuilderState(applyInitialCounts(defaultState(baseCards, modCards, minNulls, modifierCapacityDefault)))
-    setModSearch('')
+    setCostFilterIndex(0)
+    setTargetFilterIndex(0)
+    setRarityFilterIndex(0)
     setHasBuiltDeck(false)
     setHasShuffledDeck(false)
     setOpsError(null)
@@ -581,7 +679,7 @@ export default function DeckBuilder({
   }
 
   // Moves all or one discard card of a given id back to the deck (top)
-  function returnDiscardGroupToDeck(cardId: string, all = true) {
+  function returnDiscardGroupToDeck(cardId: string, all = false) {
     setBuilderState((prev) => {
       const deck = [...(prev.deck ?? [])]
       const discard = [...(prev.discard ?? [])]
@@ -651,7 +749,7 @@ export default function DeckBuilder({
             <button className="counter-btn" onClick={()=>returnDiscardGroupToDeck(id)}>Deck</button>
             <button
               className="counter-btn"
-              onClick={()=>returnDiscardGroupToHand(id, true)}
+              onClick={()=>returnDiscardGroupToHand(id)}
               disabled={(builderState.hand ?? []).length >= (builderState.handLimit ?? DEFAULT_HAND_LIMIT)}
             >
               Hand
@@ -689,8 +787,8 @@ export default function DeckBuilder({
           modText = card.text
         }
       }
-      const effectDetails = !isBase ? details.filter((d: any) => d.label?.toLowerCase() === 'effect') : []
-      const metaDetails = !isBase ? details.filter((d: any) => d.label?.toLowerCase() !== 'effect') : []
+      const effectDetails = !isBase && !isNull ? details.filter((d: any) => d.label?.toLowerCase() === 'effect') : []
+      const metaDetails = !isBase && !isNull ? details.filter((d: any) => d.label?.toLowerCase() !== 'effect') : []
 
       const cardStyle: React.CSSProperties = {
         zIndex: 100 - index,
@@ -713,7 +811,7 @@ export default function DeckBuilder({
                 </div>
               </div>
             </div>
-            {!isBase && (
+            {!isBase && !isNull && (
               <div className="text-body card-text hand-text">
                 {showCardDetails ? (
                   <>
@@ -751,8 +849,8 @@ export default function DeckBuilder({
               </div>
             )}
           </div>
-          <div className="hand-actions">
-            {isBase ? (
+          <div className="hand-actions" style={{ justifyContent: isNull ? 'flex-end' : undefined }}>
+            {isNull ? null : isBase ? (
               <button onClick={() => startPlayBase(id)} disabled={!canPlayBase}>Play Base</button>
             ) : (
               <button onClick={() => attachModifier(id)} disabled={false}>Attach</button>
@@ -769,6 +867,26 @@ export default function DeckBuilder({
       )
     })
   }, [activePlay, builderState.hand, getCard, renderDetails, showCardDetails])
+
+  const handGhostCard = (
+    <div key="hand-ghost" className="hand-card ghost-hand-card" aria-hidden="true">
+      <div className="hand-content">
+        <div className="hand-meta">
+          <div>
+            <div className="hand-title">Deck Ready</div>
+            <div className="hand-subtitle">
+              <span className="hand-type">Awaiting Draw</span>
+            </div>
+          </div>
+        </div>
+        <div className="text-body card-text hand-text" style={{ opacity: 0.65 }}>
+          Draw to populate your hand.
+        </div>
+      </div>
+    </div>
+  )
+
+  const handDisplayCards = groupedHandStacks.length > 0 ? groupedHandStacks : [handGhostCard]
 
   // Move grouped items from hand to discard (single or all)
   function discardGroupFromHand(cardId: string, all = false, origin: 'played' | 'discarded' = 'discarded') {
@@ -903,22 +1021,41 @@ export default function DeckBuilder({
   }
 
   const skillGridClass = `card-grid base-card-grid skill-grid${showBuilderSections ? ' deck-builder-skill-grid' : ''}`
+  const modifierOverlayVisible = !simpleCounters && showModifierCards && (modifierOverlayPinned || modifierOverlayInView)
+  const toggleModifierHelper = useCallback(() => {
+    setModifierOverlayPinned((prev) => !prev)
+  }, [])
 
   return (
     <>
+    {!simpleCounters && showModifierCards && (
+      <div
+        className={`mod-overlay ${modifierOverlayVisible ? 'is-visible' : ''} ${modifierOverlayPinned ? 'is-pinned' : ''}`}
+        data-mode={modifierOverlayPinned ? 'pinned' : 'peek'}
+        role="status"
+        aria-live="polite"
+      >
+        <div className="mod-overlay-label">{modOverlayLabel}</div>
+        <div className="mod-overlay-value">{modCapacityRemaining}</div>
+        <div className="mod-overlay-meta">Used {modCapacityUsed} / {modCapacityTotal}</div>
+      </div>
+    )}
     <main className="app-shell">
 
       {showBuilderSections && (
         <div className="page">
-          <div className="page-header">
-            <div>
+          <div className="page-header" style={{ alignItems: 'center', justifyContent: 'space-between', textAlign: 'center' }}>
+            <div style={{ flex: '1 1 auto' }}>
               <h1>Engram Deck Builder</h1>
               <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
                 <ImportExportJSON filenamePrefix={exportPrefix} />
               </div>
             </div>
-            <div style={{ display: 'flex', alignItems: 'center' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, flex: '0 0 auto' }}>
               {lockPill}
+              <button onClick={() => toggleLockDeck()}>
+                {builderState.isLocked ? 'Unlock Deck' : 'Lock Deck'}
+              </button>
             </div>
           </div>
           <section className="summary-stack">
@@ -1037,16 +1174,36 @@ export default function DeckBuilder({
               </section>
 
               {showModifierCards && (
-                <section className="compact" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
+                <section ref={modifierSectionRef} className="compact" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                  <div className="modifier-header-row">
+                    <div className="modifier-header-text">
                       <h2 style={{ marginBottom: 4 }}>Modifier Cards</h2>
                       <p className="muted" style={{ marginTop: 0 }}>Each modifier consumes capacity equal to its card cost. Stay within your Engram Modifier Capacity.</p>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      <label style={{ fontWeight: 600 }}>Search Mods</label>
-                      <input type="text" placeholder="Search name, target, effect" value={modSearch} onChange={(event) => setModSearch(event.target.value)} style={{ minWidth: 0, width: '100%' }} />
-                    </div>
+                    <button
+                      type="button"
+                      className={`mod-helper-btn ${modifierOverlayPinned ? 'is-active' : ''}`}
+                      onClick={toggleModifierHelper}
+                      aria-pressed={modifierOverlayPinned}
+                      title="Pin the modifier counter helper"
+                    >
+                      <span className="mod-helper-label">Counter Helper</span>
+                      <span className="mod-helper-state">{modCapacityRemaining} left</span>
+                    </button>
+                  </div>
+                  <div className="filter-pill-row" role="group" aria-label="Modifier filters">
+                    <button type="button" className={`filter-pill ${activeCostFilter !== null ? 'is-active' : ''}`} onClick={cycleCostFilter}>
+                      <span className="filter-pill-label">Cost</span>
+                      <span className="filter-pill-value">{costFilterLabel}</span>
+                    </button>
+                    <button type="button" className={`filter-pill ${activeTargetFilter ? 'is-active' : ''}`} onClick={cycleTargetFilter}>
+                      <span className="filter-pill-label">Target</span>
+                      <span className="filter-pill-value">{targetFilterLabel}</span>
+                    </button>
+                    <button type="button" className={`filter-pill ${activeRarityFilter ? 'is-active' : ''}`} onClick={cycleRarityFilter}>
+                      <span className="filter-pill-label">Rarity</span>
+                      <span className="filter-pill-value">{rarityFilterLabel}</span>
+                    </button>
                   </div>
 
                   <div className="card-grid mod-card-grid">
@@ -1133,8 +1290,11 @@ export default function DeckBuilder({
                     ref={handListRef}
                     onScroll={updateHandNav}
                   >
-                    {groupedHandStacks.length > 0 ? groupedHandStacks : <div className="muted">No cards in hand</div>}
+                    {handDisplayCards}
                   </div>
+                  {groupedHandStacks.length === 0 && (
+                    <div className="muted" style={{ marginTop: 6, textAlign: 'center' }}>No cards in hand</div>
+                  )}
                   <div className="hand-nav hand-nav-with-count">
                     <button
                       className="hand-nav-btn"
@@ -1196,48 +1356,61 @@ export default function DeckBuilder({
             {/* Deck Operations directly below the hand */}
             <section className={skillGridClass}>
               <div>
-                <h2>Deck Operations</h2>
-                <div className="ops-toolbar">
+                <h2 style={{ textAlign: 'center' }}>Deck Operations</h2>
+                <div className="ops-toolbar ops-toolbar-column">
                   <button
+                    className={`draw-health-btn draw-health-${drawHealthVariant}`}
                     onClick={handleDraw}
                     disabled={(builderState.hand ?? []).length >= (builderState.handLimit ?? DEFAULT_HAND_LIMIT)}
+                    title={drawHealthLabel}
                   >
-                    Draw 1
+                    <span>Draw 1</span>
+                    <span className="draw-health-percent">{drawHealthPercent}%</span>
                   </button>
-                  <button
-                    className={builderState.isLocked && hasBuiltDeck && !hasShuffledDeck ? 'cta-pulse' : undefined}
-                    onClick={() => shuffleDeck()}
-                  >
-                    Shuffle
-                  </button>
-                  <button
-                    className={builderState.isLocked && !hasBuiltDeck ? 'cta-pulse' : undefined}
-                    onClick={() => generateDeck(true)}
-                  >
-                    Build Deck
-                  </button>
-                  <button
-                    className={needsLock ? 'cta-pulse' : undefined}
-                    onClick={() => toggleLockDeck()}
-                  >
-                    {builderState.isLocked ? 'Unlock Deck' : 'Lock Deck'}
-                  </button>
+                  <div className="ops-btn-standard">
+                    <button
+                      className={builderState.isLocked && hasBuiltDeck && !hasShuffledDeck ? 'cta-pulse' : undefined}
+                      onClick={() => shuffleDeck()}
+                    >
+                      Shuffle
+                    </button>
+                  </div>
+                  {lockControlsInOps && (
+                    <button
+                      className={needsLock ? 'cta-pulse' : undefined}
+                      onClick={() => toggleLockDeck()}
+                    >
+                      {builderState.isLocked ? 'Unlock Deck' : 'Lock Deck'}
+                    </button>
+                  )}
                   {lockPill}
                 </div>
                 {opsError && <div className="ops-error">{opsError}</div>}
                 <div style={{ marginTop: 12 }}>
                   <div style={{ marginTop: 8 }}>
-                    <label style={{ fontWeight: 600 }}>Hand Limit</label>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 8 }}>
+                    <label style={{ fontWeight: 600, display: 'block', textAlign: 'center' }}>Hand Limit</label>
+                    <div
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        alignItems: 'center',
+                        gap: 8,
+                        marginTop: 8,
+                        textAlign: 'center',
+                      }}
+                    >
                       <input
                         type="number"
                         min={0}
+                        max={MAX_HAND_LIMIT}
                         value={builderState.handLimit ?? DEFAULT_HAND_LIMIT}
                         onChange={(e) => {
                           const next = Number.parseInt(e.target.value, 10)
                           setBuilderState((prev) => ({
                             ...prev,
-                            handLimit: Number.isNaN(next) ? prev.handLimit ?? DEFAULT_HAND_LIMIT : clamp(next, 0, DEFAULT_HAND_LIMIT),
+                            handLimit: Number.isNaN(next)
+                              ? prev.handLimit ?? DEFAULT_HAND_LIMIT
+                              : clamp(next, 0, MAX_HAND_LIMIT),
                           }))
                         }}
                         style={{ width: 80, maxWidth: '100%', textAlign: 'center' }}
@@ -1245,8 +1418,9 @@ export default function DeckBuilder({
                       <div className="muted text-body">Active cap for hand cards.</div>
                     </div>
                   </div>
-                  <div style={{ marginTop: 12 }} className="text-body">
-                    Cards Remaining: <strong>{(builderState.deck ?? []).length}</strong>
+                  <div style={{ marginTop: 12, textAlign: 'center' }} className="text-body">
+                    <div>Cards Remaining:</div>
+                    <strong>{cardsRemaining}</strong>
                   </div>
                   <div style={{ marginTop: 8 }}>
                     {/* Saved decks section removed */}
@@ -1258,8 +1432,8 @@ export default function DeckBuilder({
 
           <section style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
             <div>
-              <h3>Discard Pile</h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+              <h3 style={{ textAlign: 'center' }}>Discard Pile</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8, textAlign: 'center', alignItems: 'center' }}>
                 <div className="text-body">Discard Count: <strong>{(builderState.discard ?? []).length}</strong></div>
                 <div className="muted text-body">Duplicates stacked</div>
               </div>

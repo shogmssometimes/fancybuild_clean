@@ -27,22 +27,57 @@ function formatHHMMSS(d: Date) {
   return `${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 }
 
+const STORAGE_PREFIX = 'collapse.'
+
+const isCollapseKey = (key: string) => key.startsWith(STORAGE_PREFIX)
+
+const snapshotCollapseData = () => {
+  const data: Record<string, any> = {}
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (!key || !isCollapseKey(key)) continue
+    const raw = localStorage.getItem(key)
+    if (raw === null) continue
+    try {
+      data[key] = JSON.parse(raw)
+    } catch {
+      data[key] = raw
+    }
+  }
+  return data
+}
+
+const removeCollapseData = () => {
+  const doomed: string[] = []
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i)
+    if (key && isCollapseKey(key)) doomed.push(key)
+  }
+  doomed.forEach((key) => localStorage.removeItem(key))
+}
+
+const persistCollapseEntries = (entries: [string, any][]) => {
+  entries.forEach(([k, v]) => {
+    try {
+      localStorage.setItem(k, JSON.stringify(v))
+    } catch (e) {
+      localStorage.setItem(k, String(v))
+    }
+  })
+}
+
+const filterCollapseEntries = (payload: Record<string, any>) =>
+  Object.entries(payload).filter(([key]) => isCollapseKey(key))
+
 export default function ImportExportJSON({ filenamePrefix = 'collapse-data' }: { filenamePrefix?: string }) {
   const fileRef = useRef<HTMLInputElement | null>(null)
 
   const handleExportAll = () => {
     try {
-      const data: Record<string, any> = {}
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i)
-        if (!key) continue
-        const raw = localStorage.getItem(key)
-        if (raw === null) continue
-        try {
-          data[key] = JSON.parse(raw)
-        } catch {
-          data[key] = raw
-        }
+      const data = snapshotCollapseData()
+      if (Object.keys(data).length === 0) {
+        window.alert(`No Collapse data found to export (looking for keys starting with "${STORAGE_PREFIX}").`)
+        return
       }
 
       const now = new Date()
@@ -73,20 +108,13 @@ export default function ImportExportJSON({ filenamePrefix = 'collapse-data' }: {
 
         // Expect the export shape { meta?, data } or a plain key->value map
         const importedData: Record<string, any> = parsed.data && typeof parsed.data === 'object' ? parsed.data : parsed
+        const collapseEntries = filterCollapseEntries(importedData)
+        if (collapseEntries.length === 0) {
+          throw new Error(`Import file does not contain Collapse data (expected keys starting with "${STORAGE_PREFIX}").`)
+        }
 
         // Create a backup of current localStorage (download immediately)
-        const backup: Record<string, any> = {}
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i)
-          if (!key) continue
-          const raw = localStorage.getItem(key)
-          if (raw === null) continue
-          try {
-            backup[key] = JSON.parse(raw)
-          } catch {
-            backup[key] = raw
-          }
-        }
+        const backup = snapshotCollapseData()
 
         const now = new Date()
         const mmddyy = formatMMDDYY(now)
@@ -95,26 +123,15 @@ export default function ImportExportJSON({ filenamePrefix = 'collapse-data' }: {
         downloadJSON(backupFilename, { meta: { createdAt: mmddyy, createdAtISO: now.toISOString() }, data: backup })
 
         // Confirm destructive import
-        const confirmMsg = 'This import will REPLACE all local app data in this browser. A backup file has been downloaded to your device. Proceed and overwrite current data?'
+        const confirmMsg = `This import will replace Collapse data stored in this browser (keys starting with "${STORAGE_PREFIX}"). A backup file has been downloaded to your device. Proceed?`
         if (!window.confirm(confirmMsg)) {
           window.alert('Import cancelled. No changes were made.')
           return
         }
 
-        // Clear existing localStorage and write imported keys
-        try {
-          localStorage.clear()
-        } catch (e) {
-          // proceed anyway
-        }
-
-        Object.entries(importedData).forEach(([k, v]) => {
-          try {
-            localStorage.setItem(k, JSON.stringify(v))
-          } catch (e) {
-            localStorage.setItem(k, String(v))
-          }
-        })
+        // Remove existing Collapse namespace entries only, then write new ones
+        removeCollapseData()
+        persistCollapseEntries(collapseEntries)
 
         window.alert('Import complete. The page will reload to apply imported data.')
         window.location.reload()
@@ -129,8 +146,8 @@ export default function ImportExportJSON({ filenamePrefix = 'collapse-data' }: {
   return (
     <div className="ops-toolbar">
       <input ref={fileRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={(e) => handleFile(e.target.files?.[0] ?? null)} />
-      <button onClick={handleExportAll} title="Export all localStorage to JSON (includes meta)">Export JSON</button>
-      <button onClick={handleImportClick} title="Import JSON and replace all localStorage (backup will be downloaded)">Import (Replace All)</button>
+      <button onClick={handleExportAll} title="Export Collapse browser data (keys prefixed collapse.)">Export JSON</button>
+      <button onClick={handleImportClick} title="Import Collapse browser data (existing Collapse keys will be replaced)">Import (Replace All)</button>
     </div>
   )
 }

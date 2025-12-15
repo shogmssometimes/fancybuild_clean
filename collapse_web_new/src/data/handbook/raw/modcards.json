@@ -15,7 +15,7 @@
   {"id": "mod-spread", "cost": 1, "name": "Spread", "target": "Self", "extraActions": "", "effect": "Split The Effect", "type": "Common", "notes": ""},
   {"id": "mod-modded-up", "cost": 1, "name": "Modded Up", "target": "Self", "extraActions": "", "effect": "Add +1 Modifier Roll", "type": "Uncommon", "notes": ""},
   {"id": "mod-curse", "cost": 1, "name": "Curse", "target": "Target CE", "extraActions": "", "effect": "Remove -1 Modifier from Target Roll", "type": "Common", "notes": ""},
-  {"id": "mod-reviver", "cost": 1, "name": "Reviver", "target": "Target Ally", "extraActions": "", "effect": "Revive downed Target", "type": "Commoin", "notes": ""},
+  {"id": "mod-reviver", "cost": 1, "name": "Reviver", "target": "Target Ally", "extraActions": "", "effect": "Revive downed Target", "type": "Common", "notes": ""},
   {"id": "mod-bless", "cost": 1, "name": "Bless", "target": "Target Ally", "extraActions": "", "effect": "Target receives +1 on Modifier roll", "type": "Common", "notes": ""},
   {"id": "mod-primal", "cost": 1, "name": "Primal", "target": "Self", "extraActions": "Add Null to top of Deck; Roll 1d4", "effect": "Modify Effect by X Result", "type": "Uncommon", "notes": ""},
   {"id": "mod-swap", "cost": 1, "name": "Swap", "target": "Target Ally", "extraActions": "", "effect": "Swap Gear from Target PC and Yourself", "type": "Common", "notes": ""},
