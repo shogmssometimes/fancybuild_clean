@@ -2,8 +2,9 @@ import path from "path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// Keep a single React instance and make HMR work under the /fancybuild/ base.
-const base = process.env.VITE_BASE_PATH || "/fancybuild/";
+// Keep a single React instance and make HMR work under the repository base path.
+const repoBasePath = "/fancybuild_clean/";
+const base = process.env.VITE_BASE_PATH || repoBasePath;
 
 export default defineConfig({
   base,
@@ -12,7 +13,7 @@ export default defineConfig({
   },
   server: {
     hmr: {
-      path: "/hmr" // avoid ws path collisions when serving under /fancybuild/
+      path: "/hmr" // avoid ws path collisions when serving under the repo base path
     }
   },
   build: {
